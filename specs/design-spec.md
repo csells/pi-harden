@@ -1,136 +1,87 @@
-# Plan: pi-harden — Generalized Self-Improvement Extension
+# harden — Design
 
-## Summary
+> See also: [Vision](vision.md) · [Requirements](requirements.md)
 
-Extract the two-layer error architecture, structured logging, hardening skill, and hardening ledger from pi-socket into a reusable **pi-harden** extension that any project can use. When installed, pi-harden gives any pi session a continuous self-improvement loop: structured error logging → hardening skill → ledger → progressive code fixes.
+## It's just a skill
 
-## Origin
+harden is an agent skill — a `SKILL.md` file with instructions any coding agent follows. No extension, no custom tools, no runtime code. The agent uses standard tools (read, write, edit, bash) to do all the work.
 
-This pattern was developed in Hyper-Pi's pi-socket extension to solve a specific problem: the extension runs inside pi's Node.js process, and unhandled exceptions kill the host agent. The solution — a two-layer error model with a feedback loop — is general enough to benefit any codebase where pi is working.
+The skill follows the [Agent Skills standard](https://agentskills.io) and works with any compatible coding agent.
 
-## What pi-harden provides
-
-### 1. Structured operational log
-
-A JSONL file at `~/.pi/logs/{project-slug}.jsonl` that captures:
-
-- **info**: Normal operations — builds, test runs, deployments, file changes
-- **warn**: Degraded conditions — flaky tests, slow operations, deprecation warnings
-- **error** + `needsHardening: true`: Unanticipated errors, test failures, crashes
-
-The log is project-scoped. Multiple pi instances working on the same project write to the same log.
-
-### 2. Hardening skill
-
-A project-local skill (`.pi/skills/harden/SKILL.md`) that:
-
-1. Reads `needsHardening` entries from the operational log
-2. Cross-references the hardening ledger for past fix attempts
-3. For recurring errors, reads prior fix commits with `git show` to learn what was tried
-4. Proposes targeted code fixes that eliminate each error class
-5. Records each fix in the ledger with git commit SHA, root cause analysis, and status
-
-### 3. Hardening ledger
-
-A version-controlled JSONL file (`.pi/skills/harden/ledger.jsonl`) that tracks every hardening action:
-
-```json
-{
-  "ts": "2026-02-22T10:00:00Z",
-  "errorClass": "test:TypeError: Cannot read properties of null",
-  "errorPattern": "Cannot read properties of null",
-  "source": "src/parser.ts:42",
-  "occurrences": 5,
-  "firstSeen": "2026-02-22T08:00:00Z",
-  "lastSeen": "2026-02-22T09:55:00Z",
-  "action": "Added null guard for token.value in parser",
-  "filesChanged": ["src/parser.ts", "src/parser.test.ts"],
-  "commit": "abc1234",
-  "status": "fixed",
-  "notes": "Root cause: lexer emits null tokens on empty input lines"
-}
-```
-
-The ledger lets the skill learn from history — what worked, what didn't, what keeps recurring.
-
-### 4. Log integration points
-
-pi-harden hooks into pi's lifecycle events to automatically capture errors:
-
-- `tool_execution_end` where `isError: true` → log the tool failure with context
-- Build/test commands that exit non-zero → log with stdout/stderr
-- Unhandled exceptions in any project-local extension → log with stack trace
-
-Projects can also write to the log explicitly:
-
-```typescript
-import { harden } from "pi-harden";
-harden.error("component", new Error("something unexpected"), { context: "..." });
-harden.info("component", "operation completed", { duration: 42 });
-```
-
-## Architecture
+## Skill Structure
 
 ```
-pi-harden (global extension)
-├── Hooks pi lifecycle events
-├── Writes to ~/.pi/logs/{project}.jsonl
-└── Installs .pi/skills/harden/ on first run
-
-.pi/skills/harden/ (project-local)
-├── SKILL.md           — the hardening skill
-└── ledger.jsonl       — tracks every fix attempt
-
-The loop:
-  Code runs → errors logged with needsHardening
-  → User or agent runs /skill:harden
-  → Skill reads log + ledger
-  → Proposes inner-layer fix
-  → Records in ledger with commit SHA
-  → Error class eliminated
-  → Log is clean
+skills/harden/
+├── SKILL.md                    — the skill instructions
+└── references/
+    └── ledger-format.md        — ledger format and matching guidance
 ```
 
-## Implementation steps
+On first run in a project, the skill creates:
 
-### Phase 1: Core extension
+```
+.harden/
+└── ledger.md                   — hardening ledger (version-controlled)
+```
 
-1. **Create `pi-harden/` package** as a new pi extension (TypeScript)
-2. **Implement the logger** — project-scoped JSONL writer with info/warn/error levels
-3. **Hook `tool_execution_end`** — capture tool failures (build errors, test failures) automatically
-4. **Hook `session_start`** — detect project, initialize log path from project slug
-5. **Scaffold the skill** — on first run in a project, create `.pi/skills/harden/SKILL.md` and `ledger.jsonl` if they don't exist
-6. **Publish as pi package** — `pi install pi-harden`
+## The Workflow
 
-### Phase 2: Hardening skill
+```
+┌─────────────────────────────────────────────────┐
+│  App runs in production / staging / local dev    │
+│  Produces timestamped logs with ERROR: lines     │
+└──────────────┬──────────────────────────────────┘
+               │
+               │  Developer invokes:
+               │  /skill:harden path/to/app.log
+               │
+               ▼
+┌─────────────────────────────────────────────────┐
+│  1. Read .harden/ledger.md                       │
+│     → What's been addressed? Last run timestamp? │
+└──────────────┬──────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────┐
+│  2. Read the log file                            │
+│     → Find ERROR: lines                          │
+│     → Focus on errors after last run             │
+│     → Compare against ledger                     │
+│     → Identify genuinely NEW errors              │
+└──────────────┬──────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────┐
+│  3. For each new error:                          │
+│     a. Read source at failing location           │
+│     b. Analyze root cause                        │
+│     c. Write a failing test                      │
+│     d. Fix the code                              │
+│     e. Verify test passes                        │
+└──────────────┬──────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────┐
+│  4. Append entries to ledger                     │
+└─────────────────────────────────────────────────┘
+```
 
-7. **Write the generic SKILL.md** — parameterized for any project (not pi-socket-specific)
-8. **Skill reads the log** — filters for `needsHardening`, groups by error class
-9. **Skill reads the ledger** — finds new vs. addressed vs. recurring errors
-10. **Skill proposes fixes** — reads source at the failing location, suggests targeted fix
-11. **Skill records in ledger** — after commit, appends entry with SHA and analysis
+## How "New" Detection Works
 
-### Phase 3: Smarter capture
+The agent uses judgment, not pattern matching. It reads ledger entries and log errors and determines whether each error has been addressed.
 
-12. **Parse build output** — detect common error patterns (TypeScript type errors, Rust compiler errors, test assertion failures) and structure them
-13. **Capture command exit codes** — any bash tool execution that fails gets logged with the command and output
-14. **Rate limiting** — don't log the same error class more than N times per session to prevent log bloat during repeated build-fix cycles
+Factors to consider:
+- **Timestamp**: Is this error from after the last hardening run?
+- **Similarity**: Does it match a ledger entry in substance, even if the exact message differs?
+- **Status**: Was a matching entry `fixed` or `acknowledged`?
+- **Recurrence**: Does a `fixed` error appear again after the fix date? If so, the fix didn't hold — treat as new.
 
-### Phase 4: Back-port to pi-socket
+This is deliberately fuzzy. A TypeError at `auth.ts:42` and a TypeError at `auth.ts:45` after a code change are probably the same issue. The agent can make that call.
 
-15. **Replace pi-socket's custom log.ts and safety.ts** with pi-harden's logger
-16. **Replace `.pi/skills/harden-pi-socket/`** with the generic `.pi/skills/harden/`
-17. **Migrate the existing ledger** entries to the new format
+## What the Skill Does NOT Do
 
-## Open questions
-
-- Should the hardening skill run automatically (e.g., at session_start if there are new errors) or only on demand?
-- Should the ledger support linking to GitHub issues for errors that need upstream fixes?
-- Should pi-harden expose an MCP tool so agents can query the error log and ledger programmatically?
-- What's the right log rotation strategy? Per-session? Per-day? Size-based?
-
-## References
-
-- Hyper-Pi pi-socket implementation: `pi-socket/src/log.ts`, `pi-socket/src/safety.ts`
-- Hyper-Pi hardening skill: `.pi/skills/harden-pi-socket/SKILL.md`
-- Hyper-Pi hardening ledger: `.pi/skills/harden-pi-socket/ledger.jsonl`
+- **Does not produce logs.** The application produces its own logs.
+- **Does not manage log files.** Rotation, retention, cleanup are the application's concern.
+- **Does not hook into any agent.** No lifecycle events, no tool interception, no agent APIs.
+- **Does not run at development time.** It reads runtime logs from the running application.
+- **Does not monitor logs.** It reads a log file when invoked and processes what it finds.
